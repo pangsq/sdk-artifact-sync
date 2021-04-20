@@ -25,13 +25,12 @@ import sys
 import urllib2
 import xml.etree.ElementTree as ElementTree
 from multiprocessing import Pool
+from subprocess import CalledProcessError
 
 __version__ = '1.0.0'
 
-sdk = os.environ['ANDROID_HOME']
-
 parser = argparse.ArgumentParser(description='Synchronize SDK artifacts with a remote Maven repo')
-parser.add_argument('--sdk', dest='sdk', help='Path to Android SDK. Defaults to ANDROID_HOME.')
+parser.add_argument('--sdk', dest='sdk', help='Path to SDK local repository. Defaults to cur path.')
 parser.add_argument('--dry-run', dest='dry_run', action='store_true', help='Prepare sync but do not execute.')
 parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='Print verbose logging.')
 parser.add_argument('repo_id', help='Remote repository ID (for authentication via settings.xml).')
@@ -45,13 +44,15 @@ if not repo_url.endswith('/'):
     repo_url += '/'
 if args.sdk is not None:
     sdk = args.sdk
+else:
+    sdk = ""
 dry_run = args.dry_run or False
 verbose = args.verbose or False
 
 if verbose:
     print 'Repository ID: %s' % repo_id
     print 'Repository URL: %s' % repo_url
-    print 'Android SDK: %s' % sdk
+    print 'Repository path: %s' % sdk
 
 if dry_run:
     print 'Dry run! No artifacts will be uploaded.'
@@ -60,19 +61,12 @@ elif verbose:
     print 'Dry run: %s' % dry_run
     print
 
-sdk_extras = os.path.join(sdk, 'extras')
-sdk_m2_repos = [
-    os.path.join(sdk_extras, 'android', 'm2repository'),
-    os.path.join(sdk_extras, 'google', 'm2repository'),
-    os.path.join(sdk_extras, 'm2repository')
-]
+sdk_m2_repos = [ sdk ]
 if verbose:
     print 'Potential SDK m2repository folders:\n  %s' % '\n  '.join(sdk_m2_repos)
 
 sdk_m2_repos = filter(lambda x: os.path.exists(x), sdk_m2_repos)
-if len(sdk_m2_repos) == 0:
-    print 'No m2repositories found in SDK extras at %s' % sdk_extras
-    sys.exit(1)
+
 if verbose:
     print 'Actual SDK m2repository folders:\n  %s' % '\n  '.join(sdk_m2_repos)
 
@@ -98,16 +92,21 @@ for sdk_m2_repo in sdk_m2_repos:
                 relative_file = os.path.relpath(artifact_file, sdk_m2_repo)
 
                 split = os.path.normpath(relative_file).split(os.sep)
-                group_id = '.'.join(split[:-3])
-                artifact_id = split[-3]
-                version = split[-2]
 
                 artifact = {
                     'file': artifact_file,
                     'relative_file': relative_file,
                     'pom': os.path.join(dir_path, artifact_name + '.pom'),
-                    'coordinates': '%s:%s:%s' % (group_id, artifact_id, version)
                 }
+                if len(split) >= 3:
+                    group_id = '.'.join(split[:-3])
+                    artifact_id = split[-3]
+                    version = split[-2]
+                    artifact['coordinates'] = '%s:%s:%s' % (group_id, artifact_id, version)
+                    artifact['in_repo'] = True
+                else:
+                    artifact['coordinates'] = file_name
+                    artifact['in_repo'] = False
 
                 artifact_sources = os.path.join(dir_path, artifact_name + '-sources.jar')
                 has_sources = os.path.exists(artifact_sources)
@@ -177,7 +176,7 @@ print '%s of %s artifacts missing from remote.' % (len(missing_artifacts), len(s
 if verbose:
     print
 
-
+deployed = 0
 for index, missing_artifact in enumerate(missing_artifacts):
     cmd = [
         'mvn',
@@ -197,13 +196,20 @@ for index, missing_artifact in enumerate(missing_artifacts):
     print '[%s / %s] Deploying %s...' % (index + 1, len(missing_artifacts), missing_artifact['coordinates']),
 
     if not dry_run:
-        if verbose:
-            subprocess.check_call(cmd)
-        else:
-            subprocess.check_output(cmd)
+        try:
+            if verbose:
+                subprocess.check_call(cmd)
+            else:
+                subprocess.check_output(cmd)
+            deployed += 1
+        except CalledProcessError as err:
+            if missing_artifact['in_repo']:
+                raise err
+            else:
+                print 'Failed to deploy, skipped'
         print 'Done!'
     else:
         print 'Skipped!'
 
 if not dry_run:
-    print 'Deployed %s artifacts.' % len(missing_artifacts)
+    print 'Deployed %s artifacts.' % deployed
